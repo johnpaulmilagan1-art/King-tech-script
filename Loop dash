@@ -1,0 +1,756 @@
+local UIS = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local VIM = game:GetService("VirtualInputManager")
+local player = game.Players.LocalPlayer
+
+--// MULTI-INSTANCE MODE
+-- Every execution is independent. Re-running this script does NOT stop older instances.
+local instanceId = tostring(os.clock()):gsub("%.", "") .. tostring(math.random(1000, 9999))
+local function isCurrent() return true end
+
+--// CONFIG
+local Config = {
+    Enabled = true,
+    LethalEnabled = true,
+    LethalAnim = "rbxassetid://10503381238",
+    LethalDelay = 0.31,
+    LethalJump = 0,
+    LethalAccuracy = 38,
+    LethalCancelDelay = 0.4,
+    LethalMode = "V1",
+    CancelEnabled = true,
+    CooldownActive = true,
+    NoClipEnabled = true,
+    DashRange = 8,
+    TouchMode = false,
+    Platform = "PC",
+    Keybind = "E",
+    CooldownAnims = {
+        ["10491993682"] = true,
+        ["10479335397"] = true,
+        ["13380255751"] = true,
+    }
+}
+
+local dashAnims = {["rbxassetid://12296113986"] = true}
+local isNoclipping = false
+local isCooldown = false
+
+-- // GLOBAL GUI VARIABLES
+local ScreenGui, MainFrame, CooldownBar, CooldownFill
+
+-- // NUMERIC ID EXTRACTION FUNCTION
+local function getId(str)
+    return tostring(str):match("%d+")
+end
+
+--// NEW DASH FUNCTION (USING REMOTEEVENT)
+local function fireDash()
+    local char = player.Character
+    if not char then return end
+    local communicate = char:FindFirstChild("Communicate")
+    if communicate then
+        local args = {{
+            Dash = Enum.KeyCode.W,
+            Key = Enum.KeyCode.Q,
+            Goal = "KeyPress"
+        }}
+        communicate:FireServer(unpack(args))
+    end
+end
+
+--// HELPER FUNCTIONS
+local function clip()
+    isNoclipping = false
+    if player.Character then
+        local hum = player.Character:FindFirstChild("Humanoid")
+        if hum then hum.AutoRotate = true end
+    end
+end
+
+local function forceCancel()
+    clip()
+    local char = player.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        for _, obj in pairs(hrp:GetChildren()) do
+            if obj:IsA("BodyVelocity") or obj:IsA("LinearVelocity") or obj:IsA("Attachment") or obj:IsA("BodyAngularVelocity") then
+                obj:Destroy()
+            end
+        end
+        hrp.AssemblyLinearVelocity = Vector3.zero
+    end
+end
+
+-- // COOLDOWN HANDLING FUNCTION
+local function startCooldown(duration)
+    if not isCurrent() or isCooldown then return end
+    isCooldown = true
+    
+    if MainFrame and CooldownBar and CooldownFill then
+        CooldownBar.Visible = true
+        CooldownFill.Size = UDim2.new(1, 0, 1, 0)
+        local tween = TweenService:Create(CooldownFill, TweenInfo.new(duration, Enum.EasingStyle.Linear), {Size = UDim2.new(0, 0, 1, 0)})
+        tween:Play()
+        
+        task.delay(duration, function()
+            isCooldown = false
+            CooldownBar.Visible = false
+        end)
+    else
+        task.wait(duration)
+        isCooldown = false
+    end
+end
+
+local function getTorsoTarget()
+    local char = player.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return nil end
+    
+    local params = OverlapParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {char}
+    
+    local parts = workspace:GetPartBoundsInRadius(char.HumanoidRootPart.Position, Config.DashRange, params)
+    local target = nil
+    local dist = Config.DashRange
+    
+    for _, part in pairs(parts) do
+        local model = part:FindFirstAncestorOfClass("Model")
+        if model and model:FindFirstChild("Humanoid") and model ~= char then
+            local torso = model:FindFirstChild("Torso") or model:FindFirstChild("UpperTorso") or model:FindFirstChild("HumanoidRootPart")
+            if torso then
+                local d = (char.HumanoidRootPart.Position - torso.Position).Magnitude
+                if d < dist then 
+                    dist = d 
+                    target = torso 
+                end
+            end
+        end
+    end
+    return target
+end
+
+--// LETHAL EXECUTION FUNCTION
+local isExecuting = false
+local function executeLethal()
+    if not isCurrent() or isExecuting or isCooldown then return end
+    if not Config.Enabled or not Config.LethalEnabled then return end
+    
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChild("Humanoid")
+    if not root or not hum then return end
+
+    local torso = getTorsoTarget()
+    if not torso then clip() return end
+    
+    isExecuting = true
+    
+    if not Config.TouchMode then
+        task.wait(Config.LethalDelay)
+    end
+    
+    if not isCurrent() then isExecuting = false return end
+    
+    root.AssemblyLinearVelocity = Vector3.new(root.AssemblyLinearVelocity.X, Config.LethalJump, root.AssemblyLinearVelocity.Z)
+    isNoclipping = true
+    fireDash()
+    
+    local startT = tick()
+    local flipped = false
+    local forwardDir = (torso.Position - root.Position).Unit
+    local sideVec = Vector3.new(-forwardDir.Z, 0, forwardDir.X)
+    local bav = nil
+    
+    if Config.LethalMode == "V1" then
+        bav = Instance.new("BodyAngularVelocity")
+        bav.MaxTorque = Vector3.new(0, 1000000, 0)
+        bav.P = 15000
+        bav.Parent = root
+    end
+    
+    local conn
+    conn = RunService.Heartbeat:Connect(function()
+        if not isCurrent() or not torso or not torso.Parent or not root or not root.Parent then 
+            if bav then bav:Destroy() end 
+            clip()
+            isExecuting = false
+            if conn then conn:Disconnect() end
+            return 
+        end
+        
+        local elapsed = tick() - startT
+        local torsoPos, rootPos = torso.Position, root.Position
+        hum.AutoRotate = false
+        
+        if Config.LethalMode == "V1" then
+            local angle = (elapsed / 0.45) * (math.pi / 1.5)
+            local radius = Config.LethalAccuracy * (1 - math.clamp(elapsed / 0.45, 0, 1))
+            local targetLookPos = torsoPos + (sideVec * math.cos(angle) + forwardDir * math.sin(angle)) * radius
+            local lookAtCF = CFrame.lookAt(rootPos, Vector3.new(targetLookPos.X, rootPos.Y, targetLookPos.Z))
+            local relativeCF = root.CFrame:Inverse() * lookAtCF
+            local _, y, _ = relativeCF:ToEulerAnglesXYZ()
+            if bav and bav.Parent then 
+                bav.AngularVelocity = Vector3.new(0, y * 30, 0) 
+            end
+        else
+            if elapsed >= Config.LethalAccuracy and not flipped then
+                root.CFrame = root.CFrame * CFrame.Angles(0, math.pi, 0)
+                flipped = true
+            end
+        end
+
+        local distXZ = (Vector2.new(rootPos.X, rootPos.Z) - Vector2.new(torsoPos.X, torsoPos.Z)).Magnitude
+        if Config.CancelEnabled and elapsed > Config.LethalCancelDelay then
+            if distXZ < 2.2 then
+                if bav then bav:Destroy() end
+                forceCancel()
+                isExecuting = false
+                conn:Disconnect()
+                return
+            end
+        end
+        
+        if not Config.Enabled or elapsed > 1.5 then
+            if bav then bav:Destroy() end
+            clip()
+            isExecuting = false
+            conn:Disconnect()
+            return
+        end
+    end)
+end
+
+--// KING LOOP DASH SIGNATURE GUI
+--// GUI only: source execution behavior above and core setup below are preserved.
+ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "KingLoopDashUI_" .. instanceId
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = game.CoreGui
+
+local function applyCorner(obj, radius)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, radius)
+    c.Parent = obj
+    return c
+end
+
+local function addStroke(obj, color, thickness)
+    local s = Instance.new("UIStroke")
+    s.Color = color
+    s.Thickness = thickness or 1
+    s.Transparency = 0.05
+    s.Parent = obj
+    return s
+end
+
+--// MAIN PANEL
+MainFrame = Instance.new("Frame")
+MainFrame.Name = "MainFrame"
+MainFrame.Size = UDim2.new(0, 210, 0, 125)
+MainFrame.Position = UDim2.new(0.5, -105, 0.42, -62)
+MainFrame.BackgroundColor3 = Color3.fromRGB(10, 10, 20)
+MainFrame.BackgroundTransparency = 0.08
+MainFrame.BorderSizePixel = 0
+MainFrame.ClipsDescendants = false -- dropdown is allowed to overflow the panel
+MainFrame.Active = true
+MainFrame.Parent = ScreenGui
+applyCorner(MainFrame, 22)
+
+local MainStroke = addStroke(MainFrame, Color3.fromRGB(80, 180, 255), 1.5)
+
+local Gradient = Instance.new("UIGradient")
+Gradient.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(18, 28, 65)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(8, 10, 22))
+})
+Gradient.Rotation = 35
+Gradient.Parent = MainFrame
+
+--// BORDER PULSE
+TweenService:Create(
+    MainStroke,
+    TweenInfo.new(2.2, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+    {Transparency = 0.55}
+):Play()
+
+--// TITLE-ONLY DRAG
+local DragArea = Instance.new("Frame")
+DragArea.BackgroundTransparency = 1
+DragArea.Size = UDim2.new(1, -55, 0, 34)
+DragArea.Position = UDim2.new(0, 8, 0, 3)
+DragArea.Active = true
+DragArea.ZIndex = 10
+DragArea.Parent = MainFrame
+
+local Title = Instance.new("TextLabel")
+Title.BackgroundTransparency = 1
+Title.Size = UDim2.new(1, -8, 0, 30)
+Title.Position = UDim2.new(0, 0, 0, 0)
+Title.Text = "King Loop Dash"
+Title.TextColor3 = Color3.fromRGB(235, 245, 255)
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 13
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.ZIndex = 11
+Title.Parent = DragArea
+
+local Accent = Instance.new("Frame")
+Accent.Size = UDim2.new(0, 28, 0, 2)
+Accent.Position = UDim2.new(0, 10, 0, 32)
+Accent.BackgroundColor3 = Color3.fromRGB(80, 180, 255)
+Accent.BorderSizePixel = 0
+Accent.ZIndex = 10
+Accent.Parent = MainFrame
+applyCorner(Accent, 2)
+
+local dragging = false
+local dragStart
+local startPos
+
+DragArea.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = MainFrame.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
+end)
+
+UIS.InputChanged:Connect(function(input)
+    if not dragging then return end
+    if input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch then
+        local delta = input.Position - dragStart
+        MainFrame.Position = UDim2.new(
+            startPos.X.Scale,
+            startPos.X.Offset + delta.X,
+            startPos.Y.Scale,
+            startPos.Y.Offset + delta.Y
+        )
+    end
+end)
+
+--// CONTROL BUTTONS
+local ToggleBtn = Instance.new("TextButton")
+ToggleBtn.Name = "ToggleButton"
+ToggleBtn.Size = UDim2.new(0, 95, 0, 42)
+ToggleBtn.Position = UDim2.new(0, 10, 0, 47)
+ToggleBtn.BackgroundColor3 = Color3.fromRGB(12, 19, 38)
+ToggleBtn.BackgroundTransparency = 0.08
+ToggleBtn.BorderSizePixel = 0
+ToggleBtn.Text = "Active"
+ToggleBtn.TextColor3 = Color3.fromRGB(230, 240, 250)
+ToggleBtn.Font = Enum.Font.GothamBold
+ToggleBtn.TextSize = 11
+ToggleBtn.AutoButtonColor = false
+ToggleBtn.ZIndex = 5
+ToggleBtn.Parent = MainFrame
+applyCorner(ToggleBtn, 11)
+addStroke(ToggleBtn, Color3.fromRGB(45, 95, 145), 1)
+
+local ToggleDot = Instance.new("Frame")
+ToggleDot.Size = UDim2.new(0, 10, 0, 10)
+ToggleDot.Position = UDim2.new(1, -17, 0.5, -5)
+ToggleDot.BackgroundColor3 = Color3.fromRGB(70, 255, 125)
+ToggleDot.BorderSizePixel = 0
+ToggleDot.ZIndex = 6
+ToggleDot.Parent = ToggleBtn
+applyCorner(ToggleDot, 5)
+
+local DelayButton = Instance.new("TextButton")
+DelayButton.Name = "DelayButton"
+DelayButton.Size = UDim2.new(0, 85, 0, 42)
+DelayButton.Position = UDim2.new(0, 115, 0, 47)
+DelayButton.BackgroundColor3 = Color3.fromRGB(12, 19, 38)
+DelayButton.BackgroundTransparency = 0.08
+DelayButton.BorderSizePixel = 0
+DelayButton.Text = "0.31 ▼"
+DelayButton.TextColor3 = Color3.fromRGB(230, 240, 250)
+DelayButton.Font = Enum.Font.GothamBold
+DelayButton.TextSize = 11
+DelayButton.AutoButtonColor = false
+DelayButton.ZIndex = 5
+DelayButton.Parent = MainFrame
+applyCorner(DelayButton, 11)
+addStroke(DelayButton, Color3.fromRGB(45, 95, 145), 1)
+
+--// DROPDOWN IS A CHILD OF MAINFRAME, NOT SCREENGUI.
+--// It therefore follows the panel when dragged while still overflowing it.
+local DelayList = Instance.new("ScrollingFrame")
+DelayList.Name = "DelayList"
+DelayList.Size = UDim2.new(0, 85, 0, 100)
+DelayList.Position = UDim2.new(0, 115, 0, 94)
+DelayList.BackgroundColor3 = Color3.fromRGB(8, 12, 26)
+DelayList.BackgroundTransparency = 0.04
+DelayList.BorderSizePixel = 0
+DelayList.ScrollBarThickness = 2
+DelayList.ScrollBarImageColor3 = Color3.fromRGB(80, 180, 255)
+DelayList.CanvasSize = UDim2.new(0, 0, 0, 0)
+DelayList.AutomaticCanvasSize = Enum.AutomaticSize.Y
+DelayList.ScrollingDirection = Enum.ScrollingDirection.Y
+DelayList.Visible = false
+DelayList.ZIndex = 40
+DelayList.Parent = MainFrame
+applyCorner(DelayList, 10)
+addStroke(DelayList, Color3.fromRGB(45, 95, 145), 1)
+
+local DelayLayout = Instance.new("UIListLayout")
+DelayLayout.Padding = UDim.new(0, 2)
+DelayLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+DelayLayout.SortOrder = Enum.SortOrder.LayoutOrder
+DelayLayout.Parent = DelayList
+
+local delayValues = {
+    0.28, 0.29, 0.30, 0.31, 0.32, 0.33, 0.34,
+    0.35, 0.36, 0.37, 0.38, 0.39, 0.40
+}
+
+local dropdownOpen = false
+
+--// SIGNATURE RIPPLE
+local function createRipple(parent)
+    local ripple = Instance.new("Frame")
+    ripple.AnchorPoint = Vector2.new(0.5, 0.5)
+    ripple.Position = UDim2.new(0.5, 0, 0.5, 0)
+    ripple.Size = UDim2.new(0, 0, 0, 0)
+    ripple.BackgroundColor3 = Color3.fromRGB(80, 180, 255)
+    ripple.BackgroundTransparency = 0.35
+    ripple.BorderSizePixel = 0
+    ripple.ZIndex = parent.ZIndex + 2
+    ripple.Parent = parent
+    applyCorner(ripple, 100)
+
+    local tween = TweenService:Create(
+        ripple,
+        TweenInfo.new(0.42, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+        {
+            Size = UDim2.new(0, 145, 0, 145),
+            BackgroundTransparency = 1
+        }
+    )
+    tween:Play()
+    tween.Completed:Connect(function()
+        if ripple.Parent then ripple:Destroy() end
+    end)
+end
+
+--// SMALL SPARK BURST
+local function createSparks(parent)
+    for i = 1, 6 do
+        local spark = Instance.new("Frame")
+        spark.AnchorPoint = Vector2.new(0.5, 0.5)
+        spark.Position = UDim2.new(0.5, 0, 0.5, 0)
+        spark.Size = UDim2.new(0, 3, 0, 3)
+        spark.BackgroundColor3 = Color3.fromRGB(100, 200, 255)
+        spark.BackgroundTransparency = 0.1
+        spark.BorderSizePixel = 0
+        spark.ZIndex = parent.ZIndex + 3
+        spark.Parent = parent
+        applyCorner(spark, 3)
+
+        local angle = math.rad((i / 6) * 360)
+        local distance = 28
+
+        TweenService:Create(
+            spark,
+            TweenInfo.new(0.32, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+            {
+                Position = UDim2.new(
+                    0.5,
+                    math.cos(angle) * distance,
+                    0.5,
+                    math.sin(angle) * distance
+                ),
+                BackgroundTransparency = 1,
+                Size = UDim2.new(0, 1, 0, 1)
+            }
+        ):Play()
+
+        task.delay(0.34, function()
+            if spark.Parent then spark:Destroy() end
+        end)
+    end
+end
+
+local function addHover(button)
+    local normalSize = button.Size
+    button.MouseEnter:Connect(function()
+        TweenService:Create(button, TweenInfo.new(0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            BackgroundTransparency = 0
+        }):Play()
+        TweenService:Create(button, TweenInfo.new(0.16, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+            Size = UDim2.new(0, normalSize.X.Offset + 2, 0, normalSize.Y.Offset + 1)
+        }):Play()
+    end)
+    button.MouseLeave:Connect(function()
+        TweenService:Create(button, TweenInfo.new(0.16, Enum.EasingStyle.Quad), {
+            BackgroundTransparency = 0.08,
+            Size = normalSize
+        }):Play()
+    end)
+end
+
+addHover(ToggleBtn)
+addHover(DelayButton)
+
+--// BUILD DELAY OPTIONS
+for _, value in ipairs(delayValues) do
+    local option = Instance.new("TextButton")
+    option.Size = UDim2.new(1, -6, 0, 25)
+    option.BackgroundColor3 = Color3.fromRGB(14, 22, 42)
+    option.BackgroundTransparency = 0.10
+    option.BorderSizePixel = 0
+    option.Text = string.format("%.2f", value)
+    option.TextColor3 = Color3.fromRGB(225, 240, 255)
+    option.Font = Enum.Font.GothamSemibold
+    option.TextSize = 10
+    option.AutoButtonColor = false
+    option.ZIndex = 41
+    option.Parent = DelayList
+    applyCorner(option, 7)
+
+    option.MouseEnter:Connect(function()
+        TweenService:Create(option, TweenInfo.new(0.1), {
+            BackgroundTransparency = 0
+        }):Play()
+    end)
+
+    option.MouseLeave:Connect(function()
+        TweenService:Create(option, TweenInfo.new(0.14), {
+            BackgroundTransparency = 0.10
+        }):Play()
+    end)
+
+    option.MouseButton1Click:Connect(function()
+        Config.LethalDelay = value
+        DelayButton.Text = string.format("%.2f ▼", value)
+        createRipple(DelayButton)
+        createSparks(DelayButton)
+
+        dropdownOpen = false
+        local closeTween = TweenService:Create(
+            DelayList,
+            TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+            {Size = UDim2.new(0, 85, 0, 0)}
+        )
+        closeTween:Play()
+        closeTween.Completed:Connect(function()
+            if not dropdownOpen then DelayList.Visible = false end
+        end)
+    end)
+end
+
+local function openDropdown()
+    DelayList.Visible = true
+    DelayList.Size = UDim2.new(0, 85, 0, 0)
+    TweenService:Create(
+        DelayList,
+        TweenInfo.new(0.24, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+        {Size = UDim2.new(0, 85, 0, 100)}
+    ):Play()
+end
+
+DelayButton.MouseButton1Click:Connect(function()
+    createRipple(DelayButton)
+    createSparks(DelayButton)
+
+    dropdownOpen = not dropdownOpen
+    if dropdownOpen then
+        openDropdown()
+    else
+        local closeTween = TweenService:Create(
+            DelayList,
+            TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+            {Size = UDim2.new(0, 85, 0, 0)}
+        )
+        closeTween:Play()
+        closeTween.Completed:Connect(function()
+            if not dropdownOpen then DelayList.Visible = false end
+        end)
+    end
+end)
+
+--// TOGGLE - ONE CONNECTION ONLY
+local function updateToggle()
+    if Config.Enabled then
+        ToggleBtn.Text = "Active"
+        ToggleDot.BackgroundColor3 = Color3.fromRGB(70, 255, 125)
+    else
+        ToggleBtn.Text = "Inactive"
+        ToggleDot.BackgroundColor3 = Color3.fromRGB(255, 70, 85)
+    end
+end
+
+ToggleBtn.MouseButton1Click:Connect(function()
+    Config.Enabled = not Config.Enabled
+    updateToggle()
+    createRipple(ToggleBtn)
+    createSparks(ToggleBtn)
+
+    TweenService:Create(
+        ToggleDot,
+        TweenInfo.new(0.22, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+        {Size = UDim2.new(0, 13, 0, 13)}
+    ):Play()
+
+    task.delay(0.22, function()
+        if ToggleDot and ToggleDot.Parent then
+            TweenService:Create(
+                ToggleDot,
+                TweenInfo.new(0.14, Enum.EasingStyle.Quad),
+                {Size = UDim2.new(0, 10, 0, 10)}
+            ):Play()
+        end
+    end)
+end)
+
+--// COOLDOWN BAR - SOURCE COOLDOWN UI, VISUALLY SUBTLE
+CooldownBar = Instance.new("Frame")
+CooldownBar.Name = "CooldownBar"
+CooldownBar.Size = UDim2.new(1, 0, 0, 2)
+CooldownBar.Position = UDim2.new(0, 0, 1, -2)
+CooldownBar.BackgroundColor3 = Color3.fromRGB(20, 80, 130)
+CooldownBar.BackgroundTransparency = 0.35
+CooldownBar.BorderSizePixel = 0
+CooldownBar.Visible = false
+CooldownBar.ZIndex = 30
+CooldownBar.Parent = MainFrame
+
+CooldownFill = Instance.new("Frame")
+CooldownFill.Name = "Fill"
+CooldownFill.Size = UDim2.new(1, 0, 1, 0)
+CooldownFill.BackgroundColor3 = Color3.fromRGB(100, 200, 255)
+CooldownFill.BorderSizePixel = 0
+CooldownFill.ZIndex = 31
+CooldownFill.Parent = CooldownBar
+
+--// FLOATING PARTICLES
+for i = 1, 14 do
+    local dot = Instance.new("Frame")
+    dot.Size = UDim2.new(0, math.random(1, 3), 0, math.random(1, 3))
+    dot.Position = UDim2.new(math.random(), 0, 1, 0)
+    dot.BackgroundColor3 = Color3.fromRGB(80, 180, 255)
+    dot.BackgroundTransparency = math.random(35, 65) / 100
+    dot.BorderSizePixel = 0
+    dot.ZIndex = 1
+    dot.Parent = MainFrame
+    applyCorner(dot, 3)
+
+    task.spawn(function()
+        while dot.Parent and isCurrent() do
+            dot.Position = UDim2.new(dot.Position.X.Scale, 0, 1, 2)
+            local tween = TweenService:Create(
+                dot,
+                TweenInfo.new(math.random(25, 45) / 10, Enum.EasingStyle.Linear),
+                {Position = UDim2.new(dot.Position.X.Scale, 0, 0, -5)}
+            )
+            tween:Play()
+            tween.Completed:Wait()
+        end
+    end)
+end
+
+--// SCREEN FLASH / PANEL GLOW
+local Flash = Instance.new("Frame")
+Flash.BackgroundColor3 = Color3.fromRGB(80, 180, 255)
+Flash.BackgroundTransparency = 1
+Flash.BorderSizePixel = 0
+Flash.Size = UDim2.new(1, 0, 1, 0)
+Flash.ZIndex = 60
+Flash.Parent = MainFrame
+applyCorner(Flash, 22)
+
+local function panelFlash()
+    Flash.BackgroundTransparency = 0.88
+    TweenService:Create(
+        Flash,
+        TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+        {BackgroundTransparency = 1}
+    ):Play()
+end
+
+-- periodic subtle signature pulse
+ task.spawn(function()
+    while MainFrame.Parent and isCurrent() do
+        TweenService:Create(
+            MainStroke,
+            TweenInfo.new(1.05, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+            {Thickness = 2.4, Transparency = 0}
+        ):Play()
+        task.wait(1.05)
+        TweenService:Create(
+            MainStroke,
+            TweenInfo.new(1.05, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+            {Thickness = 1.2, Transparency = 0.45}
+        ):Play()
+        task.wait(1.05)
+    end
+end)
+
+--// WATERMARK
+local Watermark = Instance.new("TextLabel")
+Watermark.Name = "KingTechscriptWatermark"
+Watermark.AnchorPoint = Vector2.new(1, 1)
+Watermark.Position = UDim2.new(1, -10, 1, -8)
+Watermark.Size = UDim2.new(0, 120, 0, 20)
+Watermark.BackgroundTransparency = 1
+Watermark.Text = "King_techscript"
+Watermark.TextColor3 = Color3.fromRGB(150, 205, 255)
+Watermark.TextTransparency = 0.5
+Watermark.Font = Enum.Font.GothamBold
+Watermark.TextSize = 11
+Watermark.TextXAlignment = Enum.TextXAlignment.Right
+Watermark.ZIndex = 100
+Watermark.Parent = ScreenGui
+
+--// INITIAL STATE
+updateToggle()
+panelFlash()
+
+--// CORE SETUP & NOCLIP
+local function setup(char)
+    if not isCurrent() then return end
+    local hum = char:WaitForChild("Humanoid")
+    hum.AnimationPlayed:Connect(function(track)
+        if not isCurrent() then return end
+        
+        local animId = getId(track.Animation.AnimationId)
+        if Config.CooldownActive and Config.CooldownAnims[animId] then
+            startCooldown(5)
+        end
+        
+        if Config.TouchMode or not Config.Enabled then return end
+        
+        if animId == getId(Config.LethalAnim) then
+            task.spawn(executeLethal)
+        end
+    end)
+end
+
+RunService.Stepped:Connect(function()
+    if not isCurrent() or not Config.NoClipEnabled then return end
+    
+    if isNoclipping and player.Character then
+        for _, model in pairs(workspace:GetChildren()) do
+            if model:IsA("Model") and model ~= player.Character and (model:FindFirstChild("Humanoid") or model:FindFirstChildOfClass("Humanoid")) then
+                for _, part in pairs(model:GetDescendants()) do
+                    if part:IsA("BasePart") and part.CanCollide then
+                        part.CanCollide = false
+                    end
+                end
+            end
+        end
+    end
+end)
+
+if player.Character then setup(player.Character) end
+player.CharacterAdded:Connect(setup)
